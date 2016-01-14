@@ -42,7 +42,7 @@
 #define P_BMINUS 2
 
 // Delay for FET change, microseconds
-#define FETSW_DELAY 20
+#define FETSW_DELAY 50
 
 // Interrupt period (timer2), microseconds
 #define TIMER_PERIOD 10000
@@ -213,6 +213,8 @@ float eeprom_readf(int addr) {
 
 // Debounce buttons
 void debounce_buttons() {
+  uint8_t i;
+
   for (i = 0; i < NBUTTONS; i++) {
     if (sbuttons[i] != (digitalRead(pbuttons[i]) == LOW)) {
       if (sw_check[i] > 5) {
@@ -254,15 +256,17 @@ void turn_on_coil() {
 void measure_stuff() {
   digitalWrite(P_OTEST, HIGH);
   delayMicroseconds(FETSW_DELAY);
+  // coilv = analogRead(P_ITEMP);
   coilv = analogRead(P_ITEMP);
   delayMicroseconds(FETSW_DELAY);
+  // vmainv = analogRead(P_VMAIN);
   vmainv = analogRead(P_VMAIN);
   digitalWrite(P_OTEST, LOW);
   delayMicroseconds(FETSW_DELAY);
 } // measure_stuff
 
 // Check failsafe values (battery voltage, coil resistance)
-boolean check_failsafe() {
+boolean check_failsafes() {
   return (vbat > MIN_VOLTAGE) && (rcoil > MIN_RCOIL);
 }
 
@@ -365,7 +369,7 @@ void draw() {
   u8g.drawStr(0, 32, tmpbuf);
 
   // Show internal temperature
-  dtostrf(3, 0, tmpbuf);
+  dtostrf(tair, 3, 0, tmpbuf);
   tmpbuf[3] = 'C';
   tmpbuf[4] = '\0';
   u8g.drawStr(81, 32,tmpbuf);
@@ -414,7 +418,7 @@ void update_eeprom() {
   if (need_update_eeprom) {
     eeprom_writef(0, rcoil_zero);
     eeprom_writef(4, tcut);
-    update_eeprom = false;
+    need_update_eeprom = false;
   }
 } // update_eeprom
 
@@ -585,7 +589,7 @@ void TIMER2_intcallback() {
   // Measuring is done, turning on coil back
   if (coil_on)
     turn_on_coil();
-  else {
+  else
     turn_off_coil();
 
   update_stuff();
