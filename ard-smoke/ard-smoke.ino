@@ -3,7 +3,7 @@
 //    Copyright (C) 2015  Vasim V.
 //
 //    This program is free software: you can redistribute it and/or modify
-//    it under the terms of the GNU General Public License as published by
+//    it under the terms of the GNU Lesser General Public License as published by
 //    the Free Software Foundation, either version 3 of the License, or
 //    (at your option) any later version.
 //
@@ -12,7 +12,7 @@
 //    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 //    GNU General Public License for more details.
 //
-//    You should have received a copy of the GNU General Public License
+//    You should have received a copy of the GNU Lesser General Public License
 //    along with this program. 
 
 #include <U8glib.h>
@@ -55,7 +55,13 @@
 
 // Temparture-resistance koefficient
 // Titan
-#define RTCHANGE 0.0035f
+#define RTCHANGE 0.003525f
+// 316L
+// #define RTCHANGE 0.000879f
+// 304
+// #define RTCHANGE 0.001016f
+// NiFE30
+// #define RTCHANGE 0.003200f
 // Kantal - not working (too low resolution)
 // #define RTCHANGE 0.0001f
 
@@ -71,6 +77,7 @@
 #define TEMP_ZERO 25
 
 // Use atmega's internal temperature sensor (will be calibrated with TEMP_ZERO at startup)
+// Doesn't work on atmega8 and atmega168
 #define USE_INTERNAL_TEMP
 
 // Sleep timer (in timer2 cycles, seconds*100), activate if coil button was pressed for
@@ -79,6 +86,7 @@
 // How long you should keep button pressed to change temperature, in time2 cycles (seconds*100)
 #define BUTTON_SENS_TIME 100
 
+// Quite crude numbers. TODO: implement an auto-tune
 #define PID_P 60.0
 #define PID_I 0.75
 #define PID_D 20.0
@@ -258,65 +266,6 @@ boolean check_failsafe() {
   return (vbat > MIN_VOLTAGE) && (rcoil > MIN_RCOIL);
 }
 
-// Timer interrupt - Test buttons, check temperature and fire coil, etc
-void TIMER2_intcallback() {
-  uint8_t i;
-
-  debounce_buttons();
-
-  locksleep_update();
-
-  // Measuring temperature - turning off main coil FET before
-  if (coil_on || ignore_buttons) {
-    turn_off_coil();
-  }
-
-  // Don't do anything else in sleep mode
-  if (sleeping || ignore_buttons)
-    return;
-
-  // Measure and update output from PID controller
-  measure_stuff();
-
-  // Measuring is done, turning on coil back
-  if (coil_on)
-    turn_on_coil();
-  else {
-    turn_off_coil();
-
-  update_stuff();
-
-  // PID processing (calculate output)
-  if (coil_on)
-    MyPIDCompute();
-
-#ifdef DEBUG
-  Serial.print("Temp: ");
-  Serial.print(tcur+TEMP_ZERO);
-  Serial.print("C, rcoil: ");
-  Serial.print(rcoil);
-  Serial.print("Ohm, Output: ");
-  Serial.println(Output);
-#endif
-
-  // Fire coil if button pressed
-  if (!coil_on && sbuttons[I_BCOIL] && !ignore_buttons && (tcut >= tcur) && check_failsafes()) {
-    MyPIDStart();
-    coil_on = true;
-    turn_on_coil();
-  }
-
-  // Coil shutdown if button is released or more than 5 celsius above or failsafes
-  if (!sbuttons[I_BCOIL] || ((tcur - 5) > tcut) || !check_failsafes()) {
-    coil_on = false;
-    Output = 0;
-    turn_off_coil();
-  }
-
-  // Switch ADC MUX
-  analogRead(P_ITEMP);
-} // TIMER2_intcallback
-
 #ifdef USE_INTERNAL_TEMP
 // internal temperature sensor calibration
 double tint_offset;
@@ -349,72 +298,6 @@ double get_internal_temp(void)
 } // get_internal_temp
 #endif
 
-// Main arduino setup (reset/poweron)
-void setup() {
-  Serial.begin(115200);
-
-  ignore_buttons = true;
-  sleeping = false;
-  // ADC pins
-  pinMode(P_ITEMP, INPUT);
-  pinMode(P_VMAIN, INPUT);
-  // Coil/check FETs
-  pinMode(P_OON, OUTPUT);
-  digitalWrite(P_OON, LOW);
-  coil_on = false;
-  pinMode(P_OTEST, OUTPUT);
-  digitalWrite(P_OTEST, LOW);
-  // Configuring buttons pins
-  pinMode(P_BCOIL, INPUT_PULLUP);
-  pinMode(P_BPLUS, INPUT_PULLUP);
-  pinMode(P_BMINUS, INPUT_PULLUP);
-
-  // Display init
-  // Rotate if needed
-  // u8g.setRot180();
-  // From u8g_lib example - assign default color value
-  if ( u8g.getMode() == U8G_MODE_R3G3B2 ) {
-    u8g.setColorIndex(255);     // white
-  }
-  else if ( u8g.getMode() == U8G_MODE_GRAY2BIT ) {
-    u8g.setColorIndex(3);         // max intensity
-  }
-  else if ( u8g.getMode() == U8G_MODE_BW ) {
-    u8g.setColorIndex(1);         // pixel on
-  }
-  else if ( u8g.getMode() == U8G_MODE_HICOLOR ) {
-    u8g.setHiColorByRGB(255,255,255);
-  }
-
-  // Read coil resistance at 25C from eeprom, update current values
-//  rcoil_zero = eeprom_readf(0);  
-  tcut = eeprom_readf(4);
-  if ((tcut < 100.0) || (tcut > 300.0))
-    tcut = 200;
-
-  tair = TEMP_ZERO;
-#ifdef USE_INTERNAL_TEMP
-  tint_offset = TEMP_ZERO - get_internal_temp();
-#endif
-
-  // Disable buttons until released if any of it pressed at startup
-  if ((digitalRead(P_BPLUS) == LOW) || (digitalRead(P_BMINUS) == LOW) || (digitalRead(P_BCOIL) == LOW)) {
-    int i;
-    
-    ignore_buttons = true;
-    for (i = 0; i < NBUTTONS; i++)
-      sbuttons[i] = (digitalRead(pbuttons[i]) == LOW);
-  } else
-    ignore_buttons = false;
-
-  // Timers initialize
-  MsTimer2::set(TIMER_PERIOD / 1000, TIMER2_intcallback);
-  MsTimer2::start();
-  
-  Timer1.initialize(1000);
-  Timer1.pwm(9, 0, PWM_PERIOD);
-} // setup
-
 static int loopcycle = 0;
 static int showtemp;
 static float showrcoil;
@@ -426,6 +309,7 @@ void wake_up_check() {
 
 float vbat_show;
 
+// u8glib draw function
 void draw() {
   char tmpbuf[16];
 
@@ -607,6 +491,136 @@ void check_unsleep() {
     }
   }
 } // check_unsleep
+
+void TIMER2_intcallback();
+
+
+// Main arduino setup (reset/poweron)
+void setup() {
+  Serial.begin(115200);
+
+  ignore_buttons = true;
+  sleeping = false;
+  // ADC pins
+  pinMode(P_ITEMP, INPUT);
+  pinMode(P_VMAIN, INPUT);
+  // Coil/check FETs
+  pinMode(P_OON, OUTPUT);
+  digitalWrite(P_OON, LOW);
+  coil_on = false;
+  pinMode(P_OTEST, OUTPUT);
+  digitalWrite(P_OTEST, LOW);
+  // Configuring buttons pins
+  pinMode(P_BCOIL, INPUT_PULLUP);
+  pinMode(P_BPLUS, INPUT_PULLUP);
+  pinMode(P_BMINUS, INPUT_PULLUP);
+
+  // Display init
+  // Rotate if needed
+  // u8g.setRot180();
+  // From u8g_lib example - assign default color value
+  if ( u8g.getMode() == U8G_MODE_R3G3B2 ) {
+    u8g.setColorIndex(255);     // white
+  }
+  else if ( u8g.getMode() == U8G_MODE_GRAY2BIT ) {
+    u8g.setColorIndex(3);         // max intensity
+  }
+  else if ( u8g.getMode() == U8G_MODE_BW ) {
+    u8g.setColorIndex(1);         // pixel on
+  }
+  else if ( u8g.getMode() == U8G_MODE_HICOLOR ) {
+    u8g.setHiColorByRGB(255,255,255);
+  }
+
+  // Read coil resistance at 25C from eeprom, update current values
+//  rcoil_zero = eeprom_readf(0);
+  tcut = eeprom_readf(4);
+  if ((tcut < 100.0) || (tcut > 300.0))
+    tcut = 200;
+
+  tair = TEMP_ZERO;
+#ifdef USE_INTERNAL_TEMP
+  tint_offset = TEMP_ZERO - get_internal_temp();
+#endif
+
+  // Disable buttons until released if any of it pressed at startup
+  if ((digitalRead(P_BPLUS) == LOW) || (digitalRead(P_BMINUS) == LOW) || (digitalRead(P_BCOIL) == LOW)) {
+    int i;
+
+    ignore_buttons = true;
+    for (i = 0; i < NBUTTONS; i++)
+      sbuttons[i] = (digitalRead(pbuttons[i]) == LOW);
+  } else
+    ignore_buttons = false;
+
+  // Timers initialize
+  MsTimer2::set(TIMER_PERIOD / 1000, TIMER2_intcallback);
+  MsTimer2::start();
+
+  Timer1.initialize(1000);
+  Timer1.pwm(9, 0, PWM_PERIOD);
+} // setup
+
+
+// Timer interrupt - Test buttons, check temperature and fire coil, etc
+void TIMER2_intcallback() {
+  uint8_t i;
+
+  debounce_buttons();
+
+  locksleep_update();
+
+  // Measuring temperature - turning off main coil FET before
+  if (coil_on || ignore_buttons) {
+    turn_off_coil();
+  }
+
+  // Don't do anything else in sleep mode
+  if (sleeping || ignore_buttons)
+    return;
+
+  // Measure and update output from PID controller
+  measure_stuff();
+
+  // Measuring is done, turning on coil back
+  if (coil_on)
+    turn_on_coil();
+  else {
+    turn_off_coil();
+
+  update_stuff();
+
+  // PID processing (calculate output)
+  if (coil_on)
+    MyPIDCompute();
+
+#ifdef DEBUG
+  Serial.print("Temp: ");
+  Serial.print(tcur+TEMP_ZERO);
+  Serial.print("C, rcoil: ");
+  Serial.print(rcoil);
+  Serial.print("Ohm, Output: ");
+  Serial.println(Output);
+#endif
+
+  // Fire coil if button pressed
+  if (!coil_on && sbuttons[I_BCOIL] && !ignore_buttons && (tcut >= tcur) && check_failsafes()) {
+    MyPIDStart();
+    coil_on = true;
+    turn_on_coil();
+  }
+
+  // Coil shutdown if button is released or more than 5 celsius above or failsafes
+  if (!sbuttons[I_BCOIL] || ((tcur - 5) > tcut) || !check_failsafes()) {
+    coil_on = false;
+    Output = 0;
+    turn_off_coil();
+  }
+
+  // Switch ADC MUX
+  analogRead(P_ITEMP);
+} // TIMER2_intcallback
+
 
 // Main arduino loop
 void loop() {
