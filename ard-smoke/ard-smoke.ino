@@ -42,7 +42,7 @@
 #define P_BMINUS 2
 
 // Delay for FET change, microseconds
-#define FETSW_DELAY 50
+#define FETSW_DELAY 20
 
 // Interrupt period (timer2), microseconds
 #define TIMER_PERIOD 10000
@@ -87,7 +87,7 @@
 #define BUTTON_SENS_TIME 100
 
 // Quite crude numbers. TODO: implement an auto-tune
-#define PID_P 60.0
+#define PID_P 70.0
 #define PID_I 0.75
 #define PID_D 20.0
 
@@ -97,13 +97,14 @@ U8GLIB_SSD1306_128X64 u8g(U8G_I2C_OPT_DEV_0|U8G_I2C_OPT_NO_ACK|U8G_I2C_OPT_FAST)
 boolean coil_on;
 // Voltage readings from ADCs
 int coilv;
+int coilv_prev;
 int vmainv;
+int vmainv_prev;
 // Calculated from vmainv, in volts
 float vbat;
 // Calculated from coilv, in volts and ohms
 float voff;
 float rcoil;
-float rcoil_prev;
 
 // Coil resistance at 25C
 float rcoil_zero = 0.0f;
@@ -177,14 +178,19 @@ void MyPIDCompute()
 
 // Calculate coil resistance, temperature and voltage
 void update_stuff() {
-  rcoil = (vmainv * RTEST) / (coilv * 1.0f + 1) - RTEST;
+  if (coilv_prev <= 0)
+    coilv_prev = coilv;
+  if (vmainv_prev <= 0)
+    vmainv_prev = vmainv;
+  rcoil = (((vmainv + vmainv_prev) / 2.0f) * RTEST) / (((coilv + coilv_prev) / 2.0f) * 1.0f + 1) - RTEST;
   if (rcoil < 0)
     rcoil = 0;
   if (rcoil_zero > 0.01) 
-    tcur = double((((rcoil + rcoil_prev) /2) / rcoil_zero - 1) / RTCHANGE) + tair;
+    tcur = double((rcoil / rcoil_zero - 1) / RTCHANGE) + tair;
   else
     tcur = tair;
-  rcoil_prev = rcoil;
+  vmainv_prev = vmainv;
+  coilv_prev = coilv;
   vbat = (10.0 * vmainv) / 1024.0;
 } // update_temp
 
@@ -256,11 +262,9 @@ void turn_on_coil() {
 void measure_stuff() {
   digitalWrite(P_OTEST, HIGH);
   delayMicroseconds(FETSW_DELAY);
-  // coilv = analogRead(P_ITEMP);
-  coilv = analogRead(P_ITEMP);
-  delayMicroseconds(FETSW_DELAY);
-  // vmainv = analogRead(P_VMAIN);
-  vmainv = analogRead(P_VMAIN);
+  coilv = (analogRead(P_ITEMP) + analogRead(P_ITEMP)) / 2;
+  // delayMicroseconds(FETSW_DELAY);
+  vmainv = (analogRead(P_VMAIN) + analogRead(P_VMAIN)) / 2;
   digitalWrite(P_OTEST, LOW);
   delayMicroseconds(FETSW_DELAY);
 } // measure_stuff
@@ -298,6 +302,8 @@ double get_internal_temp(void)
   t = (wADC - 324.31 ) / 1.22;
   // Reset reference voltage
   analogReference(DEFAULT);
+  delay(20);
+  analogRead(P_ITEMP);
   return (t);
 } // get_internal_temp
 #endif
