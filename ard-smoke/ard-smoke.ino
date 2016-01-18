@@ -24,6 +24,9 @@
 // Additional info to console
 // #define DEBUG
 
+// Oversampling to get up resolution (slow and may overheat R5!!!)
+#define ADC_OVERSAMPLING
+
 // Temperature ADC pin - ITEMP
 #define P_ITEMP 0
 // Battery ADC pin - CHECK
@@ -48,30 +51,30 @@
 #define TIMER_PERIOD 10000
 
 // PWM Period, microseconds
-#define PWM_PERIOD 1024
+#define PWM_PERIOD 128
 
 // Test resistor resistance, in Ohm
-#define RTEST 4.7f
+#define RTEST 4.7
 
 // Temparture-resistance koefficient
 // Titan
-#define RTCHANGE 0.003525f
+#define RTCHANGE 0.003525
 // 316L
-// #define RTCHANGE 0.000879f
+// #define RTCHANGE 0.000879
 // 304
-// #define RTCHANGE 0.001016f
+// #define RTCHANGE 0.001016
 // NiFE30
-// #define RTCHANGE 0.003200f
+// #define RTCHANGE 0.003200
 // Kantal - not working (too low resolution)
-// #define RTCHANGE 0.0001f
+// #define RTCHANGE 0.0001
 
 // Minium coil resistance, in Ohm
-#define MIN_RCOIL 0.2f
+#define MIN_RCOIL 0.2
 
 // Warning battery voltage (will flash on screen)
-#define WARN_VOLTAGE 6.6f
+#define WARN_VOLTAGE 6.6
 // Minimum battery voltage (will not fire coil if lower)
-#define MIN_VOLTAGE 6.2f
+#define MIN_VOLTAGE 6.2
 
 // Default zero (when no difference between rcoil_zero and rcoil) temperature
 #define TEMP_ZERO 25
@@ -87,9 +90,9 @@
 #define BUTTON_SENS_TIME 100
 
 // Quite crude numbers. TODO: implement an auto-tune
-#define PID_P 70.0
-#define PID_I 0.75
-#define PID_D 20.0
+#define PID_P 100.0
+#define PID_I 2.0
+#define PID_D 50.0
 
 U8GLIB_SSD1306_128X64 u8g(U8G_I2C_OPT_DEV_0|U8G_I2C_OPT_NO_ACK|U8G_I2C_OPT_FAST);
 
@@ -101,13 +104,12 @@ int coilv_prev;
 int vmainv;
 int vmainv_prev;
 // Calculated from vmainv, in volts
-float vbat;
+double vbat;
 // Calculated from coilv, in volts and ohms
-float voff;
-float rcoil;
+double rcoil;
 
 // Coil resistance at 25C
-float rcoil_zero = 0.0f;
+double rcoil_zero = 0.0f;
 
 // Current temperature in celsius
 double tcur;
@@ -191,27 +193,31 @@ void update_stuff() {
     tcur = tair;
   vmainv_prev = vmainv;
   coilv_prev = coilv;
+#ifdef ADC_OVERSAMPLING
+  vbat = (10.0 * vmainv) / 4096.0;
+#else
   vbat = (10.0 * vmainv) / 1024.0;
+#endif
 } // update_temp
 
-// Write float into eeprom
-void eeprom_writef(int addr, float x) {
+// Write double into eeprom
+void eeprom_writef(int addr, double x) {
   uint8_t i;
 
-  for (i = 0; i < sizeof(float); i++) {
+  for (i = 0; i < sizeof(double); i++) {
     EEPROM.update(addr + i, *((char *) &x + i));
   }
 } // eeprom_writef
 
-// Read float from eeprom
-float eeprom_readf(int addr) {
-  float x;
+// Read double from eeprom
+double eeprom_readf(int addr) {
+  double x;
   int i;
 
-  for (i = 0; i < sizeof(float); i++) {
+  for (i = 0; i < sizeof(double); i++) {
     *((char *) &x + i) = EEPROM.read(addr + i);
   }
-  // Test if we did read float really, not "NAN"
+  // Test if we did read double really, not "NAN"
   if ((x+1.0) > x)
     return x;
   return 0;
@@ -258,14 +264,33 @@ void turn_on_coil() {
   Timer1.pwm(P_OON, Output, PWM_PERIOD);
 }
 
+#ifdef ADC_OVERSAMPLING
+int analogReadOver(uint8_t pin) {
+  int res = 0;
+
+  // Switch ADC MUX
+  analogRead(pin);
+
+  // Read multiple times
+  for(int i = 0; i < 4; i++)
+    res += analogRead(pin);
+
+  return res;
+}
+
+#define MY_ANALOGREAD(x) analogReadOver(x)
+#else
+#define MY_ANALOGREAD(x) ((analogRead(x) + analogRead(x)) / 2)
+#endif
+
 // Measure temperature and voltage
 void measure_stuff() {
   digitalWrite(P_OTEST, HIGH);
   delayMicroseconds(FETSW_DELAY);
-  coilv = (analogRead(P_ITEMP) + analogRead(P_ITEMP)) / 2;
-  // delayMicroseconds(FETSW_DELAY);
-  vmainv = (analogRead(P_VMAIN) + analogRead(P_VMAIN)) / 2;
+  coilv = MY_ANALOGREAD(P_ITEMP);
   digitalWrite(P_OTEST, LOW);
+  // delayMicroseconds(FETSW_DELAY);
+  vmainv = MY_ANALOGREAD(P_VMAIN);
   delayMicroseconds(FETSW_DELAY);
 } // measure_stuff
 
@@ -302,6 +327,10 @@ double get_internal_temp(void)
   t = (wADC - 324.31 ) / 1.22;
   // Reset reference voltage
   analogReference(DEFAULT);
+#ifdef ADC_OVERSAMPLING
+  ADCSRA |= _BV(ADPS2);
+  ADCSRA &= ~(_BV(ADPS0) | _BV(ADPS1));
+#endif
   delay(20);
   analogRead(P_ITEMP);
   return (t);
@@ -310,14 +339,14 @@ double get_internal_temp(void)
 
 static int loopcycle = 0;
 static int showtemp;
-static float showrcoil;
+static double showrcoil;
 
 // D2 change interrupt call - lock sleep mode for 2 seconds
 void wake_up_check() {
   lock_sleep = 300;
 } // wake_up_check
 
-float vbat_show;
+double vbat_show;
 
 // u8glib draw function
 void draw() {
@@ -331,12 +360,9 @@ void draw() {
 
   // Battery voltage, flashing if too low
   memcpy(tmpbuf, "Batt", 4);
-  if (vmainv < 1022) {
-    dtostrf(vbat, 4, 1, tmpbuf+4);
-    memcpy(tmpbuf+8, "V - ", 4);
-  } else
-    memcpy(tmpbuf+4, " MAX", 5);
-
+  dtostrf(vbat, 4, 1, tmpbuf+4);
+  memcpy(tmpbuf+8, "V - ", 4);
+  
   if (vbat > 6.3) 
     memcpy(tmpbuf+12, "OK", 3);
   else {
@@ -381,7 +407,7 @@ void draw() {
   u8g.drawStr(81, 32,tmpbuf);
   
   // Show current temperature and coil state
-  dtostrf(float(showtemp), 4, 0, tmpbuf);
+  dtostrf(double(showtemp), 4, 0, tmpbuf);
   tmpbuf[4] = 'C';
   tmpbuf[5] = '\0';
   u8g.drawStr(18, 16, tmpbuf);
@@ -391,7 +417,7 @@ void draw() {
     u8g.drawStr(0, 16, "  ");
 
   // Show current output level (quite useless, too fast change)
-  dtostrf(float(Output), 5, 0, tmpbuf);
+  dtostrf(double(Output), 5, 0, tmpbuf);
   u8g.drawStr(64, 48, tmpbuf);
 } // draw
 
@@ -606,10 +632,14 @@ void TIMER2_intcallback() {
 
 #ifdef DEBUG
   Serial.print("Temp: ");
-  Serial.print(tcur+TEMP_ZERO);
+  Serial.print(tcur);
+  Serial.print("C:");
+  Serial.print(tcut);
   Serial.print("C, rcoil: ");
   Serial.print(rcoil);
-  Serial.print("Ohm, Output: ");
+  Serial.print("Ohm, vmainv: ");
+  Serial.print(vmainv);
+  Serial.print(", Output: ");
   Serial.println(Output);
 #endif
 
@@ -637,7 +667,6 @@ void loop() {
   int i;
   
   vbat_show = vbat;
-  voff = (10.0 * coilv) / 1024.0;
   showtemp = tcur;
   showrcoil = rcoil;
 
