@@ -189,8 +189,11 @@ void update_stuff() {
     rcoil = 0;
   if (rcoil_zero > 0.01) 
     tcur = double((rcoil / rcoil_zero - 1) / RTCHANGE) + tair;
-  else
+  else {
+    // Set coil resistance at current one (assume tair temperature)
     tcur = tair;
+    rcoil_zero = rcoil;
+  }
   vmainv_prev = vmainv;
   coilv_prev = coilv;
 #ifdef ADC_OVERSAMPLING
@@ -480,14 +483,16 @@ void entering_sleep() {
 void exit_sleep() {
   int i;
 
-  rcoil_zero = 0;
+  coilv_prev = 0;
+  vmainv_prev = 0;
+  rcoil_zero = 0.0;
   sleeping = false;
   u8g.sleepOff();
   for (i = 0; i < NBUTTONS; i++)
     idlebuttons[i] = 0;
 #ifdef USE_INTERNAL_TEMP
   tair = get_internal_temp() + tint_offset;
-#endif
+#endif  
 } // exit_sleep
 
 // un-ignore buttons after startup with pressed
