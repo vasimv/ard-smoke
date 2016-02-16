@@ -13,7 +13,7 @@
 //    GNU General Public License for more details.
 //
 //    You should have received a copy of the GNU Lesser General Public License
-//    along with this program. 
+//    along with this program.
 
 #include <U8glib.h>
 #include <MsTimer2.h>
@@ -24,13 +24,15 @@
 // Additional info to console
 // #define DEBUG
 
-// Oversampling to get up resolution (slow and may overheat R5!!!)
-#define ADC_OVERSAMPLING
+// Oversampling to get up resolution (slow and may overheat R5!!!), how many samples
+#define ADC_OVERSAMPLING 4
 
 // Temperature ADC pin - ITEMP
 #define P_ITEMP 0
-// Battery ADC pin - CHECK
-#define P_VMAIN 1
+// Battery ADC pin - BATT
+#define P_VMAIN 2
+// Q3 (measure P-FET) output voltage pin - CHECK
+#define P_VCHECK 1
 // Coil N-FET gate - OOn
 #define P_OON 9
 // Temperature check N-FET gate - OTest
@@ -51,10 +53,13 @@
 #define TIMER_PERIOD 10000
 
 // PWM Period, microseconds
-#define PWM_PERIOD 128
+#define PWM_PERIOD 512
 
 // Test resistor resistance, in Ohm
-#define RTEST 4.7
+#define RTEST 15
+
+// Zener voltage (on P_VCHECK)
+#define VCHECK_ZENER 3.3
 
 // Temparture-resistance koefficient
 // Titan
@@ -69,7 +74,7 @@
 // #define RTCHANGE 0.0001
 
 // Minium coil resistance, in Ohm
-#define MIN_RCOIL 0.2
+#define MIN_RCOIL 0.3
 
 // Warning battery voltage (will flash on screen)
 #define WARN_VOLTAGE 6.6
@@ -87,14 +92,14 @@
 #define SLEEP_TIME 12000
 
 // How long you should keep button pressed to change temperature, in time2 cycles (seconds*100)
-#define BUTTON_SENS_TIME 100
+#define BUTTON_SENS_TIME 33
 
 // Quite crude numbers. TODO: implement an auto-tune
-#define PID_P 100.0
-#define PID_I 2.0
-#define PID_D 50.0
+#define PID_P 10.0
+#define PID_I 10.0
+#define PID_D 10.0
 
-U8GLIB_SSD1306_128X64 u8g(U8G_I2C_OPT_DEV_0|U8G_I2C_OPT_NO_ACK|U8G_I2C_OPT_FAST);
+U8GLIB_SSD1306_128X64 u8g(U8G_I2C_OPT_DEV_0 | U8G_I2C_OPT_NO_ACK | U8G_I2C_OPT_FAST);
 
 // Coil is on or not
 boolean coil_on;
@@ -103,6 +108,8 @@ int coilv;
 int coilv_prev;
 int vmainv;
 int vmainv_prev;
+int vcheck;
+int vcheck_prev;
 // Calculated from vmainv, in volts
 double vbat;
 // Calculated from coilv, in volts and ohms
@@ -157,25 +164,25 @@ void MyPIDStart() {
 // Calculate output
 void MyPIDCompute()
 {
-   double timeChange = TIMER_PERIOD / 1000;
-   double error = tcut - tcur;
-   errSum += (error * timeChange);
-   double dErr = (error - lastErr) / timeChange;
-   double preOutput;
-  
-   /*Compute PID Output*/
-   preOutput = PID_P * error + PID_I * errSum + PID_D * dErr;
-   if ((preOutput - outputLast) > MAX_CHANGE)
-     preOutput = outputLast + MAX_CHANGE;
-   else if ((outputLast - preOutput) > MAX_CHANGE)
-     preOutput = outputLast - MAX_CHANGE;   
-   Output = preOutput - outputLast;
-   if (Output < 0)
-     Output = 0;
-  
-   /*Remember some variables for next time*/
-   outputLast = preOutput;
-   lastErr = error;
+  double timeChange = TIMER_PERIOD / 1000;
+  double error = tcut - tcur;
+  errSum += (error * timeChange);
+  double dErr = (error - lastErr) / timeChange;
+  double preOutput;
+
+  /*Compute PID Output*/
+  preOutput = PID_P * error + PID_I * errSum + PID_D * dErr;
+  if ((preOutput - outputLast) > MAX_CHANGE)
+    preOutput = outputLast + MAX_CHANGE;
+  else if ((outputLast - preOutput) > MAX_CHANGE)
+    preOutput = outputLast - MAX_CHANGE;
+  Output = preOutput - outputLast;
+  if (Output < 0)
+    Output = 0;
+
+  /*Remember some variables for next time*/
+  outputLast = preOutput;
+  lastErr = error;
 } // MyPIDCompute
 
 // Calculate coil resistance, temperature and voltage
@@ -184,10 +191,12 @@ void update_stuff() {
     coilv_prev = coilv;
   if (vmainv_prev <= 0)
     vmainv_prev = vmainv;
-  rcoil = (((vmainv + vmainv_prev) / 2.0f) * RTEST) / (((coilv + coilv_prev) / 2.0f) * 1.0f + 1) - RTEST;
+  if (vcheck_prev <= 0)
+    vcheck_prev = vcheck;
+  rcoil = RTEST * ( 1 / ((vcheck * 1.0) / (coilv * 1.0) - 1));
   if (rcoil < 0)
-    rcoil = 0;
-  if (rcoil_zero > 0.01) 
+    rcoil = 0.0;
+  if (rcoil_zero > 0.01)
     tcur = double((rcoil / rcoil_zero - 1) / RTCHANGE) + tair;
   else {
     // Set coil resistance at current one (assume tair temperature)
@@ -195,9 +204,10 @@ void update_stuff() {
     rcoil_zero = rcoil;
   }
   vmainv_prev = vmainv;
+  vcheck_prev = vcheck;
   coilv_prev = coilv;
 #ifdef ADC_OVERSAMPLING
-  vbat = (10.0 * vmainv) / 4096.0;
+  vbat = (10.0 * vmainv) / (1024 * ADC_OVERSAMPLING);
 #else
   vbat = (10.0 * vmainv) / 1024.0;
 #endif
@@ -221,7 +231,7 @@ double eeprom_readf(int addr) {
     *((char *) &x + i) = EEPROM.read(addr + i);
   }
   // Test if we did read double really, not "NAN"
-  if ((x+1.0) > x)
+  if ((x + 1.0) > x)
     return x;
   return 0;
 } // eeprom_readf
@@ -275,7 +285,7 @@ int analogReadOver(uint8_t pin) {
   analogRead(pin);
 
   // Read multiple times
-  for(int i = 0; i < 4; i++)
+  for (int i = 0; i < ADC_OVERSAMPLING; i++)
     res += analogRead(pin);
 
   return res;
@@ -283,18 +293,25 @@ int analogReadOver(uint8_t pin) {
 
 #define MY_ANALOGREAD(x) analogReadOver(x)
 #else
-#define MY_ANALOGREAD(x) ((analogRead(x) + analogRead(x)) / 2)
+#define MY_ANALOGREAD(x) analogRead(x)
 #endif
 
 // Measure temperature and voltage
 void measure_stuff() {
-  digitalWrite(P_OTEST, HIGH);
+  digitalWrite(P_OTEST, LOW);
   delayMicroseconds(FETSW_DELAY);
   coilv = MY_ANALOGREAD(P_ITEMP);
-  digitalWrite(P_OTEST, LOW);
+
   // delayMicroseconds(FETSW_DELAY);
   vmainv = MY_ANALOGREAD(P_VMAIN);
+  vcheck = MY_ANALOGREAD(P_VCHECK);
+  digitalWrite(P_OTEST, HIGH);
   delayMicroseconds(FETSW_DELAY);
+#ifdef ADC_OVERSAMPLING
+  vcheck = vcheck + VCHECK_ZENER * ADC_OVERSAMPLING * 1024 / 5;
+#else
+  vcheck = vcheck + VCHECK_ZENER * 1024 / 5;
+#endif
 } // measure_stuff
 
 // Check failsafe values (battery voltage, coil resistance)
@@ -323,17 +340,16 @@ double get_internal_temp(void)
   delay(20);            // wait for voltages to become stable.
   ADCSRA |= _BV(ADSC);  // Start the ADC
   // Detect end-of-conversion
-  while (bit_is_set(ADCSRA,ADSC));
+  while (bit_is_set(ADCSRA, ADSC));
   // Reading register "ADCW" takes care of how to read ADCL and ADCH.
   wADC = ADCW;
   // The offset of 324.31 could be wrong. It is just an indication.
   t = (wADC - 324.31 ) / 1.22;
-  // Reset reference voltage
-  analogReference(DEFAULT);
 #ifdef ADC_OVERSAMPLING
   ADCSRA |= _BV(ADPS2);
   ADCSRA &= ~(_BV(ADPS0) | _BV(ADPS1));
 #endif
+  analogReference(DEFAULT);
   delay(20);
   analogRead(P_ITEMP);
   return (t);
@@ -351,6 +367,10 @@ void wake_up_check() {
 
 double vbat_show;
 
+// Coordinates for helvR12 font
+#define CX(x) (x * 9)
+#define CY(y) ((y + 1) * 16)
+
 // u8glib draw function
 void draw() {
   char tmpbuf[16];
@@ -358,70 +378,70 @@ void draw() {
   // Don't draw if we're going into sleep mode
   if (!sleeping && idlebuttons[I_BCOIL] > SLEEP_TIME)
     return;
-    
+
   u8g.setFont(u8g_font_helvR12);
 
   // Battery voltage, flashing if too low
   memcpy(tmpbuf, "Batt", 4);
-  dtostrf(vbat, 4, 1, tmpbuf+4);
-  memcpy(tmpbuf+8, "V - ", 4);
-  
-  if (vbat > 6.3) 
-    memcpy(tmpbuf+12, "OK", 3);
+  dtostrf(vbat, 4, 1, tmpbuf + 4);
+  memcpy(tmpbuf + 8, "V - ", 4);
+
+  if (vbat > 6.3)
+    memcpy(tmpbuf + 12, "OK", 3);
   else {
     if (loopcycle %  2)
       u8g.setFont(u8g_font_helvB12);
-    memcpy(tmpbuf+12, "LOW!", 5);
+    memcpy(tmpbuf + 12, "LOW!", 5);
   }
-  u8g.drawStr(0, 64, tmpbuf);
+  u8g.drawStr(CX(0), CY(3), tmpbuf);
   u8g.setFont(u8g_font_helvR12);
-  
+
   // Buttons states (right top corner)
   if (sbuttons[I_BCOIL])
-    u8g.drawStr(90, 16, "C");
+    u8g.drawStr(CX(10), CY(0), "C");
   else
-    u8g.drawStr(90, 16, ".");
+    u8g.drawStr(CX(10), CY(0), ".");
 
   if (sbuttons[I_BPLUS])
-    u8g.drawStr(99, 16, "+");
+    u8g.drawStr(CX(11), CY(0), "+");
   else
-    u8g.drawStr(99, 16, ".");
+    u8g.drawStr(CX(11), CY(0), ".");
 
   if (sbuttons[I_BMINUS])
-    u8g.drawStr(108, 16, "-");
+    u8g.drawStr(CX(12), CY(0), "-");
   else
-    u8g.drawStr(108, 16, ".");
+    u8g.drawStr(CX(12), CY(0), ".");
 
   // Show temperature limit
   memcpy(tmpbuf, "= ", 3);
-  dtostrf(tcut, 4, 0, tmpbuf+2);
-  u8g.drawStr(0, 48, tmpbuf);
-  
+  dtostrf(tcut, 4, 0, tmpbuf + 2);
+  u8g.drawStr(CX(0), CY(2), tmpbuf);
+
   // Show coil resistance
   tmpbuf[0] = 'R';
-  dtostrf(showrcoil, 5, 2, tmpbuf+1);
-  memcpy(tmpbuf+6, "O", 2);
-  u8g.drawStr(0, 32, tmpbuf);
+  dtostrf(showrcoil, 5, 2, tmpbuf + 1);
+  memcpy(tmpbuf + 6, "O", 2);
+  u8g.drawStr(CX(0), CY(1), tmpbuf);
 
   // Show internal temperature
   dtostrf(tair, 3, 0, tmpbuf);
   tmpbuf[3] = 'C';
   tmpbuf[4] = '\0';
-  u8g.drawStr(81, 32,tmpbuf);
-  
+  u8g.drawStr(CX(9), CY(1), tmpbuf);
+
   // Show current temperature and coil state
   dtostrf(double(showtemp), 4, 0, tmpbuf);
   tmpbuf[4] = 'C';
   tmpbuf[5] = '\0';
-  u8g.drawStr(18, 16, tmpbuf);
+  u8g.drawStr(CX(2), CY(0), tmpbuf);
   if (coil_on)
-    u8g.drawStr(0, 16, ">>");
+    u8g.drawStr(CX(0), CY(0), ">>");
   else
-    u8g.drawStr(0, 16, "  ");
+    u8g.drawStr(CX(0), CY(0), "  ");
 
   // Show current output level (quite useless, too fast change)
   dtostrf(double(Output), 5, 0, tmpbuf);
-  u8g.drawStr(64, 48, tmpbuf);
+  u8g.drawStr(CX(7), CY(2), tmpbuf);
 } // draw
 
 // To test if minus button was pressed 3 times in 6 seconds - exit sleep mode
@@ -429,7 +449,7 @@ boolean last_b_state;
 int nchanges;
 int ncycles;
 
-// Update EEPROM with temperature limit 
+// Update EEPROM with temperature limit
 boolean need_update_eeprom = false;
 
 // Change temperature limit if MINUS or PLUS pressed
@@ -473,7 +493,7 @@ void prepare_sleep() {
 void entering_sleep() {
   ignore_buttons = true;
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-  attachInterrupt(0,wake_up_check, CHANGE);
+  attachInterrupt(0, wake_up_check, CHANGE);
   sleep_enable();
   sleep_mode();
   // Return here after MINUS pressed
@@ -485,14 +505,16 @@ void exit_sleep() {
 
   coilv_prev = 0;
   vmainv_prev = 0;
-  rcoil_zero = 0.0;
+  rcoil = 0.0;
+  rcoil_zero = 0.0;  
   sleeping = false;
   u8g.sleepOff();
   for (i = 0; i < NBUTTONS; i++)
     idlebuttons[i] = 0;
 #ifdef USE_INTERNAL_TEMP
   tair = get_internal_temp() + tint_offset;
-#endif  
+#endif
+  delay(20);
 } // exit_sleep
 
 // un-ignore buttons after startup with pressed
@@ -545,16 +567,21 @@ void setup() {
   // ADC pins
   pinMode(P_ITEMP, INPUT);
   pinMode(P_VMAIN, INPUT);
+  pinMode(P_VCHECK, INPUT);
   // Coil/check FETs
   pinMode(P_OON, OUTPUT);
   digitalWrite(P_OON, LOW);
   coil_on = false;
+  digitalWrite(P_OTEST, HIGH);
   pinMode(P_OTEST, OUTPUT);
-  digitalWrite(P_OTEST, LOW);
+  digitalWrite(P_OTEST, HIGH);
   // Configuring buttons pins
   pinMode(P_BCOIL, INPUT_PULLUP);
   pinMode(P_BPLUS, INPUT_PULLUP);
   pinMode(P_BMINUS, INPUT_PULLUP);
+
+  // Use 5V reference
+  analogReference(DEFAULT);
 
   // Display init
   // Rotate if needed
@@ -570,11 +597,11 @@ void setup() {
     u8g.setColorIndex(1);         // pixel on
   }
   else if ( u8g.getMode() == U8G_MODE_HICOLOR ) {
-    u8g.setHiColorByRGB(255,255,255);
+    u8g.setHiColorByRGB(255, 255, 255);
   }
 
   // Read coil resistance at 25C from eeprom, update current values
-//  rcoil_zero = eeprom_readf(0);
+  //  rcoil_zero = eeprom_readf(0);
   tcut = eeprom_readf(4);
   if ((tcut < 100.0) || (tcut > 300.0))
     tcut = 200;
@@ -642,7 +669,11 @@ void TIMER2_intcallback() {
   Serial.print(tcut);
   Serial.print("C, rcoil: ");
   Serial.print(rcoil);
-  Serial.print("Ohm, vmainv: ");
+  Serial.print("Ohm (");
+  Serial.print(coilv);
+  Serial.print("), vcheck: ");
+  Serial.print(vcheck);
+  Serial.print(", vmainv: ");
   Serial.print(vmainv);
   Serial.print(", Output: ");
   Serial.println(Output);
@@ -670,7 +701,7 @@ void TIMER2_intcallback() {
 // Main arduino loop
 void loop() {
   int i;
-  
+
   vbat_show = vbat;
   showtemp = tcur;
   showrcoil = rcoil;
@@ -678,14 +709,14 @@ void loop() {
   // Redraw screen
   if (!sleeping) {
     // u8g_lib picture loop
-    u8g.firstPage();  
+    u8g.firstPage();
     do {
       draw();
-    } while( u8g.nextPage() );
+    } while ( u8g.nextPage() );
   }
 
   change_temp();
-  
+
   // Sleep after turning off screen
   if (!sleeping && (idlebuttons[I_BCOIL] > SLEEP_TIME))
     prepare_sleep();
@@ -693,18 +724,18 @@ void loop() {
   // Check if should wake up (MINUS button pressed few times)
   if (sleeping)
     check_unsleep();
-  
+
   unignore_buttons();
 
   loopcycle++;
 
-//  Serial.println(vmainv);
+  //  Serial.println(vmainv);
   if (sleeping && !lock_sleep)
     entering_sleep();
-  
+
   if (((rcoil_zero < 0.01) && (rcoil > 0.01)) || (showtemp < -50)) {
     rcoil_zero = rcoil;
-//    update_eeprom = true;
+    //    update_eeprom = true;
   }
 
   update_eeprom();
